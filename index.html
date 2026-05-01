@@ -1,19 +1,447 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>ERP Demo</title>
-    <meta charset="UTF-8">
-</head>
-<body>
-    <h1>印刷厂ERP系统 Demo</h1>
-    <p>系统运行成功 ✅</p>
 
-    <h2>功能模块：</h2>
-    <ul>
-        <li>销售管理</li>
-        <li>库存管理</li>
-        <li>生产管理</li>
-        <li>财务管理</li>
-    </ul>
-</body>
-</html>
+const state = {
+  view: "dashboard",
+  search: "",
+  user: null,
+  data: {
+    orders: [],
+    customers: [],
+    inventory: [],
+    products: [],
+    bom: [],
+    workOrders: [],
+    quality: [],
+    finance: [],
+    roles: [],
+    kpis: {},
+  },
+};
+
+const pages = {
+  dashboard: "经营首页",
+  sales: "销售订单",
+  crm: "客户 CRM",
+  products: "产品与 BOM",
+  inventory: "库存管理",
+  production: "生产排程",
+  quality: "质量管理",
+  finance: "财务利润",
+  hr: "人事权限",
+};
+
+const statusClass = {
+  正常: "ok",
+  完成: "ok",
+  已收款: "ok",
+  "A 类": "ok",
+  "B 类": "info",
+  "C 类": "warn",
+  潜在客户: "warn",
+  生产中: "info",
+  待排程: "warn",
+  待采购: "warn",
+  待发货: "info",
+  加急: "bad",
+  需采购: "warn",
+  低于安全库存: "bad",
+  未收款: "bad",
+  普通: "info",
+};
+
+const content = document.querySelector("#content");
+const pageTitle = document.querySelector("#pageTitle");
+const navList = document.querySelector("#navList");
+const searchInput = document.querySelector("#globalSearch");
+const toast = document.querySelector("#toast");
+const appShell = document.querySelector("#appShell");
+const loginScreen = document.querySelector("#loginScreen");
+const userName = document.querySelector("#userName");
+const userRole = document.querySelector("#userRole");
+
+function money(value) {
+  return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", maximumFractionDigits: 0 }).format(Number(value || 0));
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[char]);
+}
+
+function badge(text) {
+  return `<span class="status ${statusClass[text] || "info"}">${escapeHtml(text)}</span>`;
+}
+
+function panel(title, body, action = "") {
+  return `<section class="panel"><div class="panel-header"><h2>${title}</h2>${action}</div>${body}</section>`;
+}
+
+function table(headers, rows) {
+  const body = rows.length ? rows.join("") : `<tr><td colspan="${headers.length}" class="empty-cell">暂无数据</td></tr>`;
+  return `<div class="table-wrap"><table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function progress(value, color = "") {
+  const safeValue = Math.max(0, Math.min(100, Number(value || 0)));
+  return `<div class="step"><span>${safeValue}%</span><div class="track"><div class="fill ${color}" style="--value:${safeValue}%"></div></div><b>${safeValue >= 90 ? "收尾" : safeValue >= 50 ? "推进" : "启动"}</b></div>`;
+}
+
+function filtered(list, keys) {
+  const keyword = state.search.trim().toLowerCase();
+  if (!keyword) return list;
+  return list.filter((item) => keys.some((key) => String(item[key] ?? "").toLowerCase().includes(keyword)));
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "请求失败");
+  return payload;
+}
+
+async function loadData() {
+  const payload = await api("/api/bootstrap");
+  state.user = payload.user;
+  state.data = payload;
+  userName.textContent = payload.user.name;
+  userRole.textContent = payload.user.role;
+  loginScreen.hidden = true;
+  appShell.hidden = false;
+  render();
+}
+
+function showToast(message) {
+  toast.textContent = message;
+  toast.classList.add("show");
+  window.setTimeout(() => toast.classList.remove("show"), 1800);
+}
+
+function renderKpis() {
+  const kpis = state.data.kpis || {};
+  return `
+    <div class="grid kpi-grid">
+      <article class="metric-card"><p>当前订单</p><strong>${kpis.todayOrders || 0}</strong><span>来自 SQLite 实时统计</span></article>
+      <article class="metric-card"><p>本月销售额</p><strong>${money(kpis.monthlySales)}</strong><span>预计利润 ${money(kpis.profit)}</span></article>
+      <article class="metric-card warning"><p>库存预警</p><strong>${kpis.inventoryAlerts || 0}</strong><span>低于安全库存自动提醒</span></article>
+      <article class="metric-card danger"><p>应收账款</p><strong>${money(kpis.receivable)}</strong><span>客户档案同步更新</span></article>
+    </div>`;
+}
+
+function renderDashboard() {
+  const orderRows = state.data.orders.slice(0, 8).map((o) => `<tr><td>${escapeHtml(o.order_no)}</td><td>${escapeHtml(o.customer)}</td><td>${escapeHtml(o.product)}</td><td>${Number(o.qty).toLocaleString()} 件</td><td>${escapeHtml(o.due_date)}</td><td>${badge(o.status)}</td><td>${o.progress}%</td></tr>`);
+  const alerts = state.data.inventory.filter((item) => item.status !== "正常").slice(0, 4);
+
+  return `
+    ${renderKpis()}
+    <div class="grid two-col" style="margin-top:16px">
+      ${panel("待处理订单", table(["订单号", "客户", "产品", "数量", "交期", "状态", "进度"], orderRows))}
+      ${panel("生产进度", `
+        <div class="timeline">
+          <div class="step"><b>开料</b><div class="track"><div class="fill green" style="--value:86%"></div></div><span>86%</span></div>
+          <div class="step"><b>制版</b><div class="track"><div class="fill" style="--value:72%"></div></div><span>72%</span></div>
+          <div class="step"><b>印刷</b><div class="track"><div class="fill" style="--value:58%"></div></div><span>58%</span></div>
+          <div class="step"><b>装订</b><div class="track"><div class="fill amber" style="--value:41%"></div></div><span>41%</span></div>
+          <div class="step"><b>包装</b><div class="track"><div class="fill green" style="--value:79%"></div></div><span>79%</span></div>
+        </div>
+      `)}
+    </div>
+    <div class="grid two-col" style="margin-top:16px">
+      ${panel("月度销售趋势", `
+        <div class="chart">
+          ${["1月", "2月", "3月", "4月", "5月"].map((m, i) => `<div class="bar" style="--height:${[42, 55, 61, 78, 66][i]}%"><span></span><span>${m}</span></div>`).join("")}
+        </div>
+      `)}
+      ${panel("最新通知", `
+        <div class="record-list">
+          ${alerts.map((item) => `<article class="record-card"><strong>${escapeHtml(item.item)} ${badge(item.status)}</strong><p>当前库存 ${Number(item.stock).toLocaleString()} ${escapeHtml(item.unit)}，安全库存 ${Number(item.safe_stock).toLocaleString()} ${escapeHtml(item.unit)}。</p></article>`).join("")}
+          <article class="record-card"><strong>系统状态 ${badge("正常")}</strong><p>登录、数据库、订单、客户、库存、工单接口均已启用。</p></article>
+        </div>
+      `)}
+    </div>`;
+}
+
+function customerOptions(selected) {
+  return state.data.customers.map((c) => `<option value="${c.id}" ${Number(selected) === c.id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
+}
+
+function productOptions(selected) {
+  return state.data.products.map((p) => `<option value="${p.id}" ${Number(selected) === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("");
+}
+
+function orderOptions(selected) {
+  return state.data.orders.map((o) => `<option value="${o.id}" ${Number(selected) === o.id ? "selected" : ""}>${escapeHtml(o.order_no)} · ${escapeHtml(o.customer)}</option>`).join("");
+}
+
+function renderSales() {
+  const rows = filtered(state.data.orders, ["order_no", "customer", "product", "status"]).map((o) => `
+    <tr>
+      <td>${escapeHtml(o.order_no)}</td><td>${escapeHtml(o.customer)}</td><td>${escapeHtml(o.product)}</td>
+      <td>${Number(o.qty).toLocaleString()}</td><td>${money(o.amount)}</td><td>${escapeHtml(o.due_date)}</td>
+      <td>${badge(o.status)}</td><td>${progress(o.progress)}</td>
+      <td class="actions"><button class="ghost-btn" data-edit="orders" data-id="${o.id}" type="button">编辑</button><button class="danger-btn" data-delete="orders" data-id="${o.id}" type="button">删除</button></td>
+    </tr>`);
+  return `
+    ${panel("新增 / 编辑销售订单", orderForm())}
+    ${panel("销售订单列表", table(["订单号", "客户", "产品", "数量", "金额", "交期", "状态", "生产进度", "操作"], rows))}
+  `;
+}
+
+function orderForm(item = {}) {
+  return `
+    <form class="mini-form crud-form" data-resource="orders" data-id="${item.id || ""}">
+      <input name="order_no" placeholder="订单号" value="${escapeHtml(item.order_no || nextNo("SO"))}" required />
+      <select name="customer_id" required>${customerOptions(item.customer_id)}</select>
+      <select name="product_id" required>${productOptions(item.product_id)}</select>
+      <input name="qty" type="number" min="1" placeholder="数量" value="${escapeHtml(item.qty || "")}" required />
+      <input name="amount" type="number" min="0" step="0.01" placeholder="金额" value="${escapeHtml(item.amount || "")}" required />
+      <input name="due_date" type="date" value="${escapeHtml(item.due_date || "")}" required />
+      <select name="status"><option>待排程</option><option>待采购</option><option>生产中</option><option>待发货</option><option>完成</option></select>
+      <input name="progress" type="number" min="0" max="100" placeholder="进度 %" value="${escapeHtml(item.progress || 0)}" />
+      <button class="primary-btn" type="submit">${item.id ? "保存订单" : "新增订单"}</button>
+      ${item.id ? '<button class="ghost-btn" data-cancel-edit type="button">取消</button>' : ""}
+    </form>`;
+}
+
+function renderCrm() {
+  const rows = filtered(state.data.customers, ["name", "level", "contact", "note"]).map((c) => `
+    <tr>
+      <td>${escapeHtml(c.name)}</td><td>${badge(c.level)}</td><td>${escapeHtml(c.contact)}</td><td>${escapeHtml(c.phone)}</td>
+      <td>${money(c.credit)}</td><td>${money(c.receivable)}</td><td>${escapeHtml(c.last_follow)}</td><td>${escapeHtml(c.note)}</td>
+      <td class="actions"><button class="ghost-btn" data-edit="customers" data-id="${c.id}" type="button">编辑</button><button class="danger-btn" data-delete="customers" data-id="${c.id}" type="button">删除</button></td>
+    </tr>`);
+  return `${panel("新增 / 编辑客户", customerForm())}${panel("客户档案", table(["客户", "等级", "联系人", "电话", "信用额度", "应收", "最近跟进", "备注", "操作"], rows))}`;
+}
+
+function customerForm(item = {}) {
+  return `
+    <form class="mini-form crud-form" data-resource="customers" data-id="${item.id || ""}">
+      <input name="name" placeholder="客户名称" value="${escapeHtml(item.name || "")}" required />
+      <select name="level"><option>A 类</option><option>B 类</option><option>C 类</option><option>潜在客户</option></select>
+      <input name="contact" placeholder="联系人" value="${escapeHtml(item.contact || "")}" required />
+      <input name="phone" placeholder="电话" value="${escapeHtml(item.phone || "")}" />
+      <input name="credit" type="number" min="0" placeholder="信用额度" value="${escapeHtml(item.credit || 0)}" />
+      <input name="receivable" type="number" min="0" placeholder="应收账款" value="${escapeHtml(item.receivable || 0)}" />
+      <input name="last_follow" placeholder="最近跟进" value="${escapeHtml(item.last_follow || "")}" />
+      <input name="note" placeholder="备注" value="${escapeHtml(item.note || "")}" />
+      <button class="primary-btn" type="submit">${item.id ? "保存客户" : "新增客户"}</button>
+      ${item.id ? '<button class="ghost-btn" data-cancel-edit type="button">取消</button>' : ""}
+    </form>`;
+}
+
+function renderProducts() {
+  const productRows = filtered(state.data.products, ["code", "name", "material", "process"]).map((p) => `<tr><td>${escapeHtml(p.code)}</td><td>${escapeHtml(p.name)}</td><td>${escapeHtml(p.size)}</td><td>${escapeHtml(p.material)}</td><td>${escapeHtml(p.process)}</td><td>${escapeHtml(p.packing)}</td><td>${money(p.standard_cost)}</td><td>${money(p.sale_price)}</td></tr>`);
+  const bomRows = state.data.bom.map((b) => `<tr><td>${escapeHtml(b.material)}</td><td>${escapeHtml(b.usage)}</td><td>${b.loss_rate}%</td><td>${escapeHtml(b.stock_note)}</td><td>${badge(b.suggestion)}</td></tr>`);
+  return `<div class="grid two-col">${panel("产品资料", table(["产品编码", "产品名称", "尺寸", "材料", "工艺", "包装", "标准成本", "销售价"], productRows))}${panel("A5 笔记本 BOM", table(["物料", "用量", "损耗率", "当前库存", "采购建议"], bomRows))}</div>`;
+}
+
+function renderInventory() {
+  const rows = filtered(state.data.inventory, ["item", "category", "status"]).map((i) => `
+    <tr>
+      <td>${escapeHtml(i.item)}</td><td>${escapeHtml(i.category)}</td><td>${Number(i.stock).toLocaleString()} ${escapeHtml(i.unit)}</td>
+      <td>${Number(i.safe_stock).toLocaleString()} ${escapeHtml(i.unit)}</td><td>${badge(i.status)}</td>
+      <td class="actions"><button class="ghost-btn" data-edit="inventory" data-id="${i.id}" type="button">编辑</button><button class="danger-btn" data-delete="inventory" data-id="${i.id}" type="button">删除</button></td>
+    </tr>`);
+  return `${panel("新增 / 编辑库存", inventoryForm())}${panel("库存预警与物料台账", table(["物料", "类别", "当前库存", "安全库存", "状态", "操作"], rows))}`;
+}
+
+function inventoryForm(item = {}) {
+  return `
+    <form class="mini-form crud-form" data-resource="inventory" data-id="${item.id || ""}">
+      <input name="item" placeholder="物料名称" value="${escapeHtml(item.item || "")}" required />
+      <select name="category"><option>原材料</option><option>辅料</option><option>包材</option><option>半成品</option><option>成品</option></select>
+      <input name="stock" type="number" min="0" step="0.01" placeholder="当前库存" value="${escapeHtml(item.stock || 0)}" />
+      <input name="safe_stock" type="number" min="0" step="0.01" placeholder="安全库存" value="${escapeHtml(item.safe_stock || 0)}" />
+      <input name="unit" placeholder="单位" value="${escapeHtml(item.unit || "张")}" required />
+      <select name="status"><option>正常</option><option>需采购</option><option>低于安全库存</option></select>
+      <button class="primary-btn" type="submit">${item.id ? "保存库存" : "新增库存"}</button>
+      ${item.id ? '<button class="ghost-btn" data-cancel-edit type="button">取消</button>' : ""}
+    </form>`;
+}
+
+function renderProduction() {
+  const columns = ["待排程", "制版", "印刷", "装订", "包装"];
+  return `
+    ${panel("新增 / 编辑生产工单", workOrderForm())}
+    ${panel("生产排程看板", `
+      <div class="process-board">
+        ${columns.map((col) => `<section class="process-column"><h3>${col}</h3>${state.data.workOrders
+          .filter((w) => col === "待排程" ? w.progress < 30 : w.process === col)
+          .map((w) => `<article class="record-card"><strong>${escapeHtml(w.work_no)} ${badge(w.priority)}</strong><p>${escapeHtml(w.order_no)} · ${escapeHtml(w.owner)}</p><p>当前工序：${escapeHtml(w.process)}</p>${progress(w.progress, w.progress > 80 ? "green" : "")}<div class="actions"><button class="ghost-btn" data-edit="work-orders" data-id="${w.id}" type="button">编辑</button><button class="danger-btn" data-delete="work-orders" data-id="${w.id}" type="button">删除</button></div></article>`)
+          .join("") || "<p class='eyebrow'>暂无工单</p>"}</section>`).join("")}
+      </div>
+    `)}`;
+}
+
+function workOrderForm(item = {}) {
+  return `
+    <form class="mini-form crud-form" data-resource="work-orders" data-id="${item.id || ""}">
+      <input name="work_no" placeholder="工单号" value="${escapeHtml(item.work_no || nextNo("MO"))}" required />
+      <select name="sales_order_id" required>${orderOptions(item.sales_order_id)}</select>
+      <select name="process"><option>待排程</option><option>制版</option><option>印刷</option><option>覆膜</option><option>模切</option><option>装订</option><option>包装</option></select>
+      <input name="owner" placeholder="负责班组" value="${escapeHtml(item.owner || "")}" required />
+      <input name="progress" type="number" min="0" max="100" placeholder="进度 %" value="${escapeHtml(item.progress || 0)}" />
+      <select name="priority"><option>普通</option><option>加急</option></select>
+      <button class="primary-btn" type="submit">${item.id ? "保存工单" : "新增工单"}</button>
+      ${item.id ? '<button class="ghost-btn" data-cancel-edit type="button">取消</button>' : ""}
+    </form>`;
+}
+
+function renderQuality() {
+  return `<div class="grid three-col">${state.data.quality.map((q) => panel(q.stage, `<div class="record-list"><article class="record-card"><strong>${escapeHtml(q.target)} ${badge(q.status)}</strong><p>${escapeHtml(q.result)}</p></article></div>`)).join("")}</div>`;
+}
+
+function renderFinance() {
+  const rows = state.data.finance.map((f) => `<tr><td>${escapeHtml(f.order_no)}</td><td>${money(f.amount)}</td><td>${money(f.material_cost)}</td><td>${money(f.labor_cost)}</td><td>${money(f.equipment_cost)}</td><td>${money(f.transport_cost)}</td><td>${money(f.received)}</td><td>${money(f.profit)}</td></tr>`);
+  const receivables = state.data.customers.filter((c) => Number(c.receivable) > 0).map((c) => `<article class="record-card"><strong>${escapeHtml(c.name)} ${badge("未收款")}</strong><p>应收 ${money(c.receivable)}，联系人：${escapeHtml(c.contact)}。</p></article>`).join("");
+  return `<div class="grid two-col">${panel("订单利润分析", table(["订单号", "销售收入", "材料", "人工", "设备", "运输", "已收款", "预计利润"], rows))}${panel("收付款提醒", `<div class="record-list">${receivables || "<p class='eyebrow'>暂无应收提醒</p>"}</div>`)}</div>`;
+}
+
+function renderHr() {
+  const rows = state.data.roles.map((r) => `<tr><td>${escapeHtml(r.role)}</td><td>${escapeHtml(r.modules)}</td><td>${escapeHtml(r.permission)}</td><td>${r.count}</td></tr>`);
+  return `${panel("角色权限", table(["角色", "可访问模块", "关键权限", "人数"], rows))}`;
+}
+
+const renderers = { dashboard: renderDashboard, sales: renderSales, crm: renderCrm, products: renderProducts, inventory: renderInventory, production: renderProduction, quality: renderQuality, finance: renderFinance, hr: renderHr };
+
+function nextNo(prefix) {
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const suffix = String(Math.floor(Math.random() * 900) + 100);
+  return `${prefix}-${String(now.getFullYear()).slice(2)}${mm}${dd}-${suffix}`;
+}
+
+function setSelectValues(scope, item) {
+  scope.querySelectorAll("select").forEach((select) => {
+    const value = item[select.name];
+    if (value !== undefined) select.value = value;
+  });
+}
+
+function render() {
+  pageTitle.textContent = pages[state.view];
+  content.innerHTML = renderers[state.view]();
+  document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === state.view));
+}
+
+function getCollection(resource) {
+  return {
+    orders: state.data.orders,
+    customers: state.data.customers,
+    inventory: state.data.inventory,
+    "work-orders": state.data.workOrders,
+  }[resource] || [];
+}
+
+function showEditForm(resource, id) {
+  const item = getCollection(resource).find((record) => Number(record.id) === Number(id));
+  if (!item) return;
+  const formHtml = { orders: orderForm, customers: customerForm, inventory: inventoryForm, "work-orders": workOrderForm }[resource](item);
+  const panelBody = document.querySelector(`.crud-form[data-resource="${resource}"]`)?.parentElement;
+  if (panelBody) {
+    panelBody.innerHTML = formHtml;
+    setSelectValues(panelBody, item);
+    panelBody.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
+
+async function deleteRecord(resource, id) {
+  await api(`/api/${resource}/${id}`, { method: "DELETE" });
+  showToast("已删除并同步数据库");
+  await loadData();
+}
+
+function formPayload(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  ["customer_id", "product_id", "sales_order_id", "qty", "amount", "progress", "credit", "receivable", "stock", "safe_stock"].forEach((key) => {
+    if (data[key] !== undefined && data[key] !== "") data[key] = Number(data[key]);
+  });
+  return data;
+}
+
+async function submitForm(form) {
+  const resource = form.dataset.resource;
+  const id = form.dataset.id;
+  const method = id ? "PUT" : "POST";
+  const path = id ? `/api/${resource}/${id}` : `/api/${resource}`;
+  await api(path, { method, body: JSON.stringify(formPayload(form)) });
+  showToast(id ? "已保存修改" : "已新增记录");
+  await loadData();
+}
+
+navList.addEventListener("click", (event) => {
+  const button = event.target.closest(".nav-item");
+  if (!button) return;
+  state.view = button.dataset.view;
+  document.querySelector(".sidebar").classList.remove("open");
+  render();
+});
+
+searchInput.addEventListener("input", (event) => {
+  state.search = event.target.value;
+  render();
+});
+
+document.querySelector("#menuToggle").addEventListener("click", () => {
+  document.querySelector(".sidebar").classList.toggle("open");
+});
+
+document.querySelector("#quickAction").addEventListener("click", () => {
+  state.view = "sales";
+  render();
+  showToast("已打开销售订单");
+});
+
+document.querySelector("#logoutBtn").addEventListener("click", async () => {
+  await api("/api/logout", { method: "POST", body: "{}" });
+  state.user = null;
+  appShell.hidden = true;
+  loginScreen.hidden = false;
+});
+
+document.querySelector("#loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    await api("/api/login", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+    await loadData();
+    showToast("登录成功");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+content.addEventListener("submit", async (event) => {
+  const form = event.target.closest(".crud-form");
+  if (!form) return;
+  event.preventDefault();
+  try {
+    await submitForm(form);
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+content.addEventListener("click", async (event) => {
+  const edit = event.target.closest("[data-edit]");
+  const remove = event.target.closest("[data-delete]");
+  const cancel = event.target.closest("[data-cancel-edit]");
+  if (edit) showEditForm(edit.dataset.edit, edit.dataset.id);
+  if (cancel) render();
+  if (remove) {
+    try {
+      await deleteRecord(remove.dataset.delete, remove.dataset.id);
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+});
+
+api("/api/me")
+  .then((payload) => (payload.user ? loadData() : Promise.reject(new Error("未登录"))))
+  .catch(() => {
+    appShell.hidden = true;
+    loginScreen.hidden = false;
+  });
